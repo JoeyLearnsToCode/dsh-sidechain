@@ -4,7 +4,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CommandNode } from '@deepseek-ai/dsh-client-runtime/client'
+import type { CommandNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { apply } from '../src/client/index'
 import { observeCreatedChildren, resolveChildSessionId } from '../src/client/SideCommandCard'
 import { resetSidechainPanel } from '../src/client/panel-state'
@@ -114,7 +114,6 @@ describe('client apply wiring', () => {
         sendPrompt?: (address: unknown, text: string) => Promise<boolean>
         refresh?: (parentSessionId: string) => void
         setCatalogOpen?: (parentSessionId: string, open: boolean) => void
-        openPath?: (path: string) => void
       }
     }
   }
@@ -128,15 +127,16 @@ describe('client apply wiring', () => {
     const refreshSubagents = vi.fn(() => Promise.resolve())
     const setSubagentCatalogOpen = vi.fn()
     const registerLocale = vi.fn()
-    const history = vi.fn(() => Promise.resolve({ result: { ok: true, value: { events: [], hasMore: false } } }))
-    const prompt = vi.fn(() => Promise.resolve({ result: { ok: true } }))
-    const connection = { api: { sessions: { history }, subagents: { prompt } } }
-    const workspaces = { openPath: vi.fn() }
+    const page = vi.fn(() => Promise.resolve({ ok: true, value: { records: [], hasMore: false } }))
+    const follow = vi.fn(() => (async function* () {
+      yield { type: 'snapshot', cursor: 0, records: [], hasMore: false }
+    })())
+    const prompt = vi.fn(() => Promise.resolve({ ok: true }))
     const ctx = {
       sessions: { refreshSubagents, setSubagentCatalogOpen, binding: vi.fn(() => undefined) },
+      remote: { session: { page, follow }, subagents: { prompt } },
       locale: { register: registerLocale },
       effect: (fn: () => void) => { fn() },
-      get: (name: string) => name === 'connection' ? connection : name === 'workspaces' ? workspaces : undefined,
       slots: {
         register: (options: RegisteredSlot['options'], _component: unknown) => {
           registered.push({ options })
@@ -149,7 +149,7 @@ describe('client apply wiring', () => {
         },
       },
     }
-    return { ctx, registered, history, prompt, refreshSubagents, setSubagentCatalogOpen, workspaces }
+    return { ctx, registered, follow, page, prompt, refreshSubagents, setSubagentCatalogOpen }
   }
 
   it('registers keyed cards, an always-mounted panel host, and the header toggle', () => {
@@ -165,20 +165,30 @@ describe('client apply wiring', () => {
   })
 
   it('panel inject wires the transcript RPC and catalog methods', async () => {
-    const { ctx, registered, history, prompt, refreshSubagents, setSubagentCatalogOpen } = fakeCtx()
+    const { ctx, registered, follow, prompt, refreshSubagents, setSubagentCatalogOpen } = fakeCtx()
     apply(ctx as never)
     const entry = registered.find(item => item.options.id === 'sidechain-panel-host')!
     const injected = entry.options.inject!('parent-1')
     const address = { parentSessionId: 'parent-1', childSessionId: CHILD_ID, mode: 'continuable' }
     const transcript = await injected.readTranscript!(address)
-    expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 8 })
-    expect(transcript).toEqual({ rows: [], produced: [] })
-    // The activity line reads a lighter tail page; an empty log yields null.
+    expect(follow).toHaveBeenCalledWith(
+      { address: { kind: 'subagent', ...address }, maxMessages: 8 },
+      expect.anything(),
+    )
+    expect(transcript).toEqual({ rows: [] })
+    // The activity line reads a lighter tail window; an empty log yields null.
     const activityLine = await injected.readActivity!(address)
-    expect(history).toHaveBeenCalledWith({ sessionId: CHILD_ID, maxMessages: 6 })
+    expect(follow).toHaveBeenCalledWith(
+      { address: { kind: 'subagent', ...address }, maxMessages: 6 },
+      expect.anything(),
+    )
     expect(activityLine).toBeNull()
     const accepted = await injected.sendPrompt!(address, '继续')
-    expect(prompt).toHaveBeenCalledWith({ ...address, content: [{ type: 'text', text: '继续' }] })
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({
+      ...address,
+      delivery: 'steer',
+      content: [{ type: 'text', text: '继续' }],
+    }))
     expect(accepted).toBe(true)
     injected.refresh!('parent-1')
     expect(refreshSubagents).toHaveBeenCalledWith('parent-1')

@@ -49,6 +49,19 @@ export const zh = {
   'composer.placeholder': '继续侧聊…（Enter 发送）',
   'composer.send': '发送',
   'composer.sendAria': '发送消息到侧会话',
+  'markdown.footnotes': '脚注',
+  'terminal.running': '运行中',
+  'terminal.failed': '失败',
+  'terminal.done': '完成',
+  'terminal.copy': '复制',
+  'terminal.copied': '已复制',
+  'terminal.noOutput': '（无输出）',
+  'terminal.collapse': '收起',
+  'terminal.collapseAria': '收起输出',
+  'terminal.expand': '展开 {count} 行',
+  'terminal.expandAria': '展开被隐藏的 {count} 行',
+  'terminal.signal': '信号 {signal}',
+  'terminal.exitCode': '退出码 {code}',
 } as const
 
 /** English dictionary, key-identical to the Chinese source of truth. */
@@ -88,6 +101,19 @@ export const en: Record<SidechainKey, string> = {
   'composer.placeholder': 'Continue side chat… (Enter to send)',
   'composer.send': 'Send',
   'composer.sendAria': 'Send message to side conversation',
+  'markdown.footnotes': 'Footnotes',
+  'terminal.running': 'Running',
+  'terminal.failed': 'Failed',
+  'terminal.done': 'Done',
+  'terminal.copy': 'Copy',
+  'terminal.copied': 'Copied',
+  'terminal.noOutput': '(no output)',
+  'terminal.collapse': 'Collapse',
+  'terminal.collapseAria': 'Collapse output',
+  'terminal.expand': 'Expand {count} lines',
+  'terminal.expandAria': 'Expand {count} hidden lines',
+  'terminal.signal': 'Signal {signal}',
+  'terminal.exitCode': 'Exit {code}',
 }
 
 /** Key union of the `sidechain` namespace (Chinese dictionary is the source of truth). */

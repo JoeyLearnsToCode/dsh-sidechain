@@ -9,19 +9,17 @@
  * before the first "Side conversation boundary" prompt and its preceding
  * seed marker, so continuation-turn seed markers do not hide older turns.
  *
- * Live streaming: `assistant/message` events only land when a step completes,
- * but `assistant/chunk` events stream token-level text and reasoning deltas.
- * The mapping accumulates both per block and supersedes them with the
- * assembled message once it lands. Tail polls merge into a per-child event
- * cache, so old rounds remain visible without re-reading the inherited seed.
+ * Live streaming: the durable log no longer carries token-level chunk events
+ * (an `assistant/message` carries its own stream records), so a running child
+ * is followed by tail polls — each poll reads a small page from the log's
+ * current end and merges it into a per-child event cache, so old rounds stay
+ * visible without re-reading the inherited seed.
  */
 
-import type { IApiClient } from '@deepseek-ai/dsh-host-apiproxy'
-import type { ToolCallView, ToolEventView, ToolResultView } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
-import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type { SubagentAddress } from '@deepseek-ai/dsh-client-connection/client'
-import { contextProvenance } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress, SubagentPromptRequest } from '@deepseek-ai/dsh-subagent/client'
+import type { SessionAttachmentRequest } from '@deepseek-ai/dsh-api-session-controller/types'
 import { lastActivity } from './sidechain-activity.ts'
 
 /**
@@ -35,13 +33,140 @@ export const TRANSCRIPT_PAGE_MESSAGES = 8
 export const ACTIVITY_PAGE_MESSAGES = 6
 export const ACTIVITY_PAGE_CAP = 4
 
-/** Detail attached to one tool row: host-computed render views (call +
- *  result) and the raw arguments, paired by the result's toolCallId. */
+/**
+ * Detail attached to one tool row: the raw call arguments, the paired
+ * result's visible text, and the failure. The 0.1.5 session journal serves
+ * durable events only — host-computed tool cards are contributed by each
+ * tool's own `tool.call.toolview` registration, so a foreign transcript
+ * reads the log itself.
+ */
 export interface ToolDetail {
-  callView?: ToolCallView | undefined
-  resultView?: ToolResultView | undefined
   arguments?: string | undefined
+  /** Visible text of the paired result's content blocks. */
+  output?: string | undefined
   error?: { name: string; code: string } | undefined
+}
+
+/**
+ * One durable event as the session journal serves it. The wire envelope IS
+ * the durable event, so the reader narrows it at the boundary.
+ */
+export interface HistoryRecord {
+  readonly event: unknown
+}
+
+/** One message-aligned backwards history page. */
+export interface HistoryPage {
+  readonly records: readonly HistoryRecord[]
+  readonly hasMore: boolean
+}
+
+/**
+ * One message-aligned backwards-history request. The address is the durable
+ * parent/child pair: a child's log has `origin: 'subagent'`, and the host
+ * rejects a bare session address for it (`session/agent-busy`).
+ */
+export interface HistoryPageRequest {
+  readonly address: SubagentAddress & { readonly kind: 'subagent' }
+  /** Inclusive log cut; `-1` reads from the log's current end. */
+  readonly throughSeq: number
+  readonly beforeSeq?: number
+  readonly maxMessages?: number
+}
+
+/** The `RemoteResult<HistoryPage>` shape a history read resolves to. */
+export type HistoryResult = { readonly ok: true; readonly value: HistoryPage } | { readonly ok: false }
+
+/**
+ * One backwards-history read against the durable parent/child address.
+ *
+ * `page` needs the exact log seq it reads through; `-1` is the empty cursor,
+ * not "the end", so the tail window (and the cursor it reports) comes from
+ * `follow`'s opening snapshot.
+ */
+export interface HistoryFollowRequest {
+  readonly address: SubagentAddress & { readonly kind: 'subagent' }
+  readonly maxMessages?: number
+}
+
+/** The opening snapshot of one follow stream: the log's tail and its cursor. */
+export type HistoryFollowFrame =
+  | {
+    readonly type: 'snapshot'
+    readonly cursor: number
+    readonly records: readonly HistoryRecord[]
+    readonly hasMore: boolean
+  }
+  | { readonly type: 'event' | 'assistant-stream' }
+
+/** The `ctx.remote.session` slice the panel consumes. */
+export interface SessionHistory {
+  page(request: HistoryPageRequest, signal?: AbortSignal): Promise<HistoryResult>
+  follow(request: HistoryFollowRequest, signal?: AbortSignal): AsyncIterable<HistoryFollowFrame>
+}
+
+/** The `ctx.remote.subagents.prompt` slice the panel consumes. */
+export interface SubagentPrompter {
+  prompt(request: SubagentPromptRequest, signal?: AbortSignal): Promise<{ readonly ok: boolean }>
+}
+
+/** One durable image read. */
+export type AttachmentResult = { readonly ok: true; readonly value: { readonly data: string } } | { readonly ok: false }
+
+/** The `ctx.remote.session.attachment` slice the panel consumes. */
+export interface SessionAttachments {
+  attachment(request: SessionAttachmentRequest): Promise<AttachmentResult>
+}
+
+/**
+ * Project a durable message source to the row's producer role and label.
+ * A local projection: the 0.1.5 platform keeps this inside the Chat and
+ * Trajectory packages, and a foreign bundle cannot import their values.
+ * @param source - Logged `user/message` source.
+ * @returns role and label rendered by the panel.
+ */
+export function contextProvenance(source: unknown): { role: 'inject' | 'recall'; label: string | null } {
+  const record = typeof source === 'object' && source !== null && !Array.isArray(source)
+    ? source as Record<string, unknown>
+    : null
+  const kind = record === null ? null : readString(record, 'kind')
+  if (record === null || kind === null) return { role: 'inject', label: null }
+  switch (kind) {
+    case 'session-reference':
+      return { role: 'recall', label: joined(collect(record, 'references', 'label')) ?? kind }
+    case 'agent-instructions':
+      return { role: 'inject', label: joined(collect(record, 'changes', 'path')) ?? kind }
+    case 'plugin':
+      return { role: 'inject', label: readString(record, 'plugin') ?? kind }
+    case 'skill-invocation':
+      return { role: 'inject', label: readString(record, 'name') ?? kind }
+    default:
+      return { role: 'inject', label: kind }
+  }
+}
+
+/** Read a non-empty string member off a durable source record. */
+function readString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** Collect one string field across an array member, in first-seen order. */
+function collect(source: Record<string, unknown>, member: string, field: string): string[] {
+  const list = source[member]
+  if (!Array.isArray(list)) return []
+  const seen: string[] = []
+  for (const entry of list) {
+    const record = typeof entry === 'object' && entry !== null ? entry as Record<string, unknown> : null
+    const value = record === null ? null : readString(record, field)
+    if (value !== null && !seen.includes(value)) seen.push(value)
+  }
+  return seen
+}
+
+/** Render a label list, or null when the source cited none. */
+function joined(names: string[]): string | null {
+  return names.length > 0 ? names.join(', ') : null
 }
 
 type ImageAttachmentRef = Extract<ContentBlock, { type: 'image' }>['attachment']
@@ -144,26 +269,23 @@ function transcriptSeedEnd(events: readonly SessionEvent[]): number {
 /**
  * Map a session log's history rows onto compact transcript rows: the
  * inherited fork seed is cut at the first boundary's preceding
- * `session/end-seed`, the boundary prompt is dropped, `assistant/chunk` text deltas accumulate into a
- * streaming row per step (superseded by the assembled `assistant/message`),
- * and tool invocations render one expandable line each — the call's view,
- * raw arguments, and the paired result's view (matched by the result's
- * `toolCallId`) ride the row as detail; a failing `tool/result` marks it.
- * @param entries - history rows (event + host-computed view) in seq order.
+ * `session/end-seed`, the boundary prompt is dropped, an `assistant/message`
+ * contributes its reasoning and text blocks in order, and tool invocations
+ * render one expandable line each — the raw call arguments and the paired
+ * result's visible text (matched by the result's `toolCallId`) ride the row
+ * as detail; a failing `tool/result` marks it.
+ * @param entries - history rows in seq order.
  * @returns display rows in log order.
  */
 export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptRow[] {
   const events = entries.map(entry => entry.event)
   const seedEnd = transcriptSeedEnd(events)
   const rows: TranscriptRow[] = []
-  /** (turn, step, block, kind) key → index of its accumulating stream row. */
-  const streamRows = new Map<string, number>()
   /** tool callId → index of its tool row in `rows` (result pairing). */
   const callRows = new Map<string, number>()
   for (let i = 0; i < events.length; i++) {
     if (i <= seedEnd) continue
     const event = events[i] as SessionEvent
-    const view = entries[i]?.view
     switch (event.type) {
       case 'user/message': {
         const refs = imageRefs(event.data.content)
@@ -189,31 +311,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         }
         break
       }
-      case 'assistant/chunk': {
-        const chunk = event.data.chunk
-        if ((chunk.type !== 'text-delta' && chunk.type !== 'reasoning-delta') || chunk.text === '') break
-        const kind = chunk.type === 'text-delta' ? 'assistant' : 'reasoning'
-        const key = `${event.data.turn}:${event.data.step}:${chunk.index}:${kind}`
-        const existing = streamRows.get(key)
-        if (existing !== undefined) {
-          const row = rows[existing]
-          if (row !== undefined && row.kind === kind) {
-            rows[existing] = { ...row, text: row.text + chunk.text }
-          }
-        } else {
-          streamRows.set(key, rows.length)
-          rows.push({ kind, seq: event.seq, text: chunk.text })
-        }
-        break
-      }
       case 'assistant/message': {
-        const prefix = `${event.data.turn}:${event.data.step}:`
-        const streamed = [...streamRows.entries()]
-          .filter(([key]) => key.startsWith(prefix))
-          .map(([, index]) => index)
-        for (const key of [...streamRows.keys()]) {
-          if (key.startsWith(prefix)) streamRows.delete(key)
-        }
         const settled = event.data.message.content.flatMap((block): TranscriptRow[] => {
           if (block.type === 'reasoning' && block.text !== '') {
             return [{ kind: 'reasoning', seq: event.seq, text: block.text }]
@@ -237,8 +335,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         if (settled.length === 0 && event.data.message.content.length === 0) {
           settled.push({ kind: 'assistant', seq: event.seq, text: '…' })
         }
-        if (streamed.length === 0) rows.push(...settled)
-        else rows.splice(Math.min(...streamed), streamed.length, ...settled)
+        rows.push(...settled)
         break
       }
       case 'tool/call': {
@@ -249,10 +346,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
           seq: event.seq,
           name: data.name,
           failed: false,
-          detail: {
-            arguments: data.arguments,
-            ...(view !== undefined && view.for === 'call' ? { callView: view.view } : {}),
-          },
+          detail: { arguments: data.arguments },
         })
         break
       }
@@ -265,6 +359,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
         // A result is failed on the explicit event error OR the block's own
         // isError flag (tools report hard failures either way).
         const failed = error !== undefined || resultBlock?.isError === true
+        const output = resultText(resultBlock)
         if (index !== undefined) {
           const row = rows[index]
           if (row !== undefined && row.kind === 'tool') {
@@ -273,7 +368,7 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
               failed,
               detail: {
                 ...row.detail,
-                ...(view !== undefined && view.for === 'result' ? { resultView: view.view } : {}),
+                ...(output === undefined ? {} : { output }),
                 ...(error === undefined ? {} : { error }),
               },
             }
@@ -301,135 +396,47 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
   return rows
 }
 
-/** One history row as session.history returns it (event + host-computed view). */
+/** One history row: the durable event the journal served. */
 export interface TranscriptEntry {
   event: SessionEvent
-  view?: ToolEventView | undefined
 }
 
 /**
- * Files the child's tool calls report having created or changed, by render
- * intent rather than tool name — the same policy as the main chat's
- * ui-deliverables: a diff card, or a generic card whose `kind` is `edit`
- * (the shape `str_replace_editor`'s insert presents). Reads, deletes, and
- * plain terminal runs produce nothing. Paths keep first-seen order and
- * appear once.
- * @param entries - history rows (views are re-derived per read by the host).
- * @returns produced file paths.
+ * Read the visible text of one tool result block, or undefined when it
+ * carries none (terminal results stay collapsed behind their own row).
+ * @param block - first content block of a `tool/result` message.
+ * @returns the nested blocks' text, or undefined.
  */
-export function producedPaths(entries: readonly TranscriptEntry[]): string[] {
-  // The same seed cut transcriptRows applies: a fresh child's tail window
-  // contains the inherited parent history, whose write/edit calls would
-  // otherwise leak the PARENT's produced files into this child's vocabulary.
-  const seedEnd = transcriptSeedEnd(entries.map(entry => entry.event))
-  // Calls whose result failed produced nothing to open (ui-deliverables
-  // policy: failed calls do not count).
-  const failedCallIds = new Set<string>()
-  for (let i = seedEnd + 1; i < entries.length; i++) {
-    const event = entries[i]?.event
-    if (event === undefined || event.type !== 'tool/result') continue
-    const block = event.data.message.content[0]
-    const callId = block?.toolCallId
-    if (callId === undefined) continue
-    if (event.data.error !== undefined || block?.isError === true) failedCallIds.add(callId)
-  }
-  const paths: string[] = []
-  const seen = new Set<string>()
-  for (let i = seedEnd + 1; i < entries.length; i++) {
-    const entry = entries[i] as TranscriptEntry
-    const view = entry.view
-    if (view === undefined || view.for !== 'call') continue
-    const call = view.view
-    if (entry.event.type !== 'tool/call' || failedCallIds.has(entry.event.data.callId)) continue
-    const locations = call.card === 'diff'
-      ? call.locations
-      : call.card === 'generic' && call.kind === 'edit'
-        ? call.locations
-        : undefined
-    if (locations === undefined) continue
-    for (const location of locations) {
-      if (seen.has(location.path)) continue
-      seen.add(location.path)
-      paths.push(location.path)
-    }
-  }
-  return paths
-}
-
-/** One-line summary of a non-terminal result view, for the expanded tool row. */
-export function resultViewSummary(view: ToolResultView): string | undefined {
-  switch (view.card) {
-    case 'generic': {
-      return view.content === undefined ? undefined : blockText(view.content)
-    }
-    case 'diff': {
-      const paths = view.diffs.map(diff => diff.path)
-      const lines = view.diffs.reduce(
-        (total, diff) => total + diff.newText.split('\n').length + (diff.oldText === null ? 0 : diff.oldText.split('\n').length),
-        0,
-      )
-      return `${paths.join(', ')} · ${lines} 行变更`
-    }
-    case 'read': {
-      if (view.content !== undefined) return blockText(view.content)
-      return `${view.path} · 显示 ${view.lines.length}/${view.totalLines} 行`
-    }
-    case 'search': {
-      if (view.shape === 'paths') return `${view.paths.length} 个路径`
-      const files = view.files.length
-      const matches = view.files.reduce((total, file) => total + file.matches.length, 0)
-      return `${files} 个文件 · ${matches} 处匹配`
-    }
-    case 'web': {
-      if (view.kind === 'search') return `${view.sources.length} 个来源`
-      return `${view.url} · HTTP ${view.statusCode}`
-    }
-    case 'terminal': {
-      return undefined
-    }
-  }
-}
-
-/**
- * Union two produced-file vocabularies, keeping first-seen order. The panel
- * accumulates across polls so a produced path remains usable after its call
- * row slides out of the current tail window.
- * @param previous - the accumulated vocabulary (may be empty on first fetch).
- * @param next - the current window's vocabulary.
- * @returns the union in first-seen order.
- */
-export function mergeProduced(
-  previous: readonly string[],
-  next: readonly string[],
-): string[] {
-  const seen = new Set(previous)
-  return [...previous, ...next.filter(path => !seen.has(path))]
+function resultText(block: ContentBlock | undefined): string | undefined {
+  if (block === undefined || block.type !== 'tool-result') return undefined
+  const text = blockText(block.content)
+  return text === '…' ? undefined : text
 }
 
 /**
  * Fetch a child's transcript.
  *
- * Reads through `session.history`, which resolves the session's preset scope
- * from its log (`presenterScopeFor`) so tool views — and thus the
- * produced-file vocabulary — are available even for cold (finished) children.
+ * Reads through `ctx.remote.session.page`, which resolves the child's durable
+ * log through its address (no activation, no navigation).
  *
  * The child's log STARTS with the entire inherited parent history (fork
- * seed), which can be tens of thousands of chunk events. A single large tail
+ * seed), which can be tens of thousands of events. A single large tail
  * window would ship the inherited seed on every poll, so the reader pages
  * backwards in small windows until a window contains the seed boundary,
  * then cuts there. Later reads fetch one tail page and merge those events into
  * the cached child transcript, retaining earlier rounds.
- * @param sessions - the api client's sessions surface.
+ * @param history - the session journal's page read.
  * @param address - durable parent/child address (only the child id is used).
- * @returns display rows plus the produced-file vocabulary, or null on
- *   transport/business failure.
+ * @param attachments - optional session-authorized image loader.
+ * @returns display rows, or null on transport/business failure.
  */
 export async function fetchTranscript(
-  sessions: IApiClient['sessions'],
+  history: SessionHistory,
   address: SubagentAddress,
-): Promise<{ rows: readonly TranscriptRow[]; produced: readonly string[] } | null> {
+  attachments?: SessionAttachments,
+): Promise<{ rows: readonly TranscriptRow[] } | null> {
   const entries = await fetchSeedCutEntries(
-    sessions, address.childSessionId, TRANSCRIPT_PAGE_MESSAGES,
+    history, address, TRANSCRIPT_PAGE_MESSAGES,
   )
   if (entries === null) return null
   const previous = transcriptEntryCache.get(address.childSessionId) ?? []
@@ -437,10 +444,11 @@ export async function fetchTranscript(
   for (const entry of entries) bySeq.set(entry.event.seq, entry)
   const transcript = [...bySeq.values()].sort((a, b) => a.event.seq - b.event.seq)
   transcriptEntryCache.set(address.childSessionId, transcript)
-  const rows = await hydrateTranscriptImages(sessions, address.childSessionId, transcriptRows(transcript))
+  const rows = transcriptRows(transcript)
   return {
-    rows,
-    produced: producedPaths(transcript),
+    rows: attachments === undefined
+      ? rows
+      : await hydrateTranscriptImages(attachments, address.childSessionId, rows),
   }
 }
 
@@ -455,11 +463,11 @@ export async function fetchTranscript(
  *   empty tail.
  */
 export async function fetchActivity(
-  sessions: IApiClient['sessions'],
+  history: SessionHistory,
   address: SubagentAddress,
 ): Promise<string | null> {
   const entries = await fetchSeedCutEntries(
-    sessions, address.childSessionId, ACTIVITY_PAGE_MESSAGES, ACTIVITY_PAGE_CAP,
+    history, address, ACTIVITY_PAGE_MESSAGES, ACTIVITY_PAGE_CAP,
   )
   if (entries === null) return null
   return lastActivity(transcriptRows(entries)) ?? null
@@ -483,7 +491,7 @@ export function resetSeedBoundaryCache(): void {
 }
 
 async function hydrateTranscriptImages(
-  sessions: IApiClient['sessions'],
+  attachments: SessionAttachments,
   childSessionId: SubagentAddress['childSessionId'],
   rows: readonly TranscriptRow[],
 ): Promise<TranscriptRow[]> {
@@ -495,20 +503,18 @@ async function hydrateTranscriptImages(
   }
   if (refs.size === 0) return [...rows]
 
-  const attachment = sessions.attachment
-  if (typeof attachment !== 'function') return [...rows]
   await Promise.all([...refs].map(async ([id, ref]) => {
     if (imageUrlCache.has(id)) return
     try {
-      const response = await attachment.call(sessions, {
+      const response = await attachments.attachment({
         sessionId: childSessionId,
         attachmentId: ref.attachmentId,
       })
-      if (!response.result.ok) {
+      if (!response.ok) {
         imageUrlCache.set(id, null)
         return
       }
-      const data = response.result.value.data
+      const data = response.value.data
       imageUrlCache.set(id, data.startsWith('data:') ? data : `data:${ref.mediaType};base64,${data}`)
     } catch {
       imageUrlCache.set(id, null)
@@ -537,32 +543,84 @@ async function hydrateTranscriptImages(
  * until a window contains the boundary. Later reads fetch one tail window and
  * cut with the cached seed marker. Overlap between pages is deduped by
  * sequence, so an inclusive `beforeSeq` contract on the host is harmless.
- * @param sessions - the api client's sessions surface.
- * @param childSessionId - the child whose own conversation to read.
+ * @param history - the session journal's page read.
+ * @param address - the child's durable parent/child address.
  * @param pageMessages - messages per backward page.
  * @param pageCap - optional backward-page cap for lightweight callers. The
  *   transcript read omits it and continues until the seed boundary.
  * @returns the seed-cut entries, or null on transport/business failure.
  */
+/**
+ * Read a child's current tail window and the log cursor it was cut at.
+ *
+ * The follow stream opens on the durable parent/child address and its first
+ * frame is the tail snapshot; the stream is aborted right after, so a poll
+ * costs one snapshot rather than an open subscription.
+ * @param history - the session journal.
+ * @param address - the child's durable parent/child address.
+ * @param pageMessages - messages in the tail window.
+ * @returns the window plus its cursor, or null on transport/business failure.
+ */
+async function readTailWindow(
+  history: SessionHistory,
+  address: SubagentAddress,
+  pageMessages: number,
+): Promise<{ entries: TranscriptEntry[]; cursor: number; hasMore: boolean } | null> {
+  const controller = new AbortController()
+  try {
+    for await (const frame of history.follow(
+      { address: { kind: 'subagent', ...address }, maxMessages: pageMessages },
+      controller.signal,
+    )) {
+      if (frame.type === 'snapshot') {
+        return {
+          entries: frame.records.map(record => ({ event: record.event as SessionEvent })),
+          cursor: frame.cursor,
+          hasMore: frame.hasMore,
+        }
+      }
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    controller.abort()
+  }
+}
+
 async function fetchSeedCutEntries(
-  sessions: IApiClient['sessions'],
-  childSessionId: string,
+  history: SessionHistory,
+  address: SubagentAddress,
   pageMessages: number,
   pageCap?: number,
 ): Promise<readonly TranscriptEntry[] | null> {
+  const childSessionId = address.childSessionId
   const cachedBoundary = seedBoundaryCache.get(childSessionId)
   const collected: TranscriptEntry[] = []
   let beforeSeq: number | undefined
   let boundarySeq = cachedBoundary
   try {
+    const tail = await readTailWindow(history, address, pageMessages)
+    if (tail === null) return null
+    let cursor = tail.cursor
+    let hasMore = tail.hasMore
     for (let page = 0; page < (pageCap ?? Number.POSITIVE_INFINITY); page++) {
-      const response = await sessions.history({
-        sessionId: childSessionId as SubagentAddress['childSessionId'],
-        maxMessages: pageMessages,
-        ...(beforeSeq === undefined ? {} : { beforeSeq }),
-      })
-      if (!response.result.ok) return null
-      const events = response.result.value.events
+      let events: TranscriptEntry[]
+      if (page === 0) {
+        events = tail.entries
+      } else {
+        const response = await history.page({
+          address: { kind: 'subagent', ...address },
+          throughSeq: cursor,
+          maxMessages: pageMessages,
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        })
+        if (!response.ok) return null
+        events = response.value.records.map(
+          record => ({ event: record.event as SessionEvent }),
+        )
+        hasMore = response.value.hasMore
+      }
       if (events.length === 0) break
       const olderThan = collected.length > 0 ? collected[0]!.event.seq : undefined
       const fresh = olderThan === undefined
@@ -587,7 +645,7 @@ async function fetchSeedCutEntries(
         break
       }
       const seedEnd = lastSeedEnd(fresh.map(entry => entry.event))
-      if (seedEnd >= 0 && response.result.value.hasMore === false) {
+      if (seedEnd >= 0 && hasMore === false) {
         // Legacy/no-boundary logs have no stronger ownership marker.
         boundarySeq = fresh[seedEnd]!.event.seq
         seedBoundaryCache.set(childSessionId, boundarySeq)
@@ -608,22 +666,27 @@ async function fetchSeedCutEntries(
  * Deliver one human message to a continuable child through its exact
  * direct-parent address (the same non-activating transport the runtime's
  * catalog navigation uses).
- * @param subagents - the api client's subagents surface.
+ * @param subagents - the subagent Remote namespace.
  * @param address - continuable parent/child address.
  * @param text - the message body (one text block).
+ * @param requestId - caller-minted prompt request id (branded by the host).
  * @returns whether the prompt was accepted.
  */
 export async function sendPrompt(
-  subagents: IApiClient['subagents'],
+  subagents: SubagentPrompter,
   address: Extract<SubagentAddress, { mode: 'continuable' }>,
   text: string,
+  requestId: SubagentPromptRequest['requestId'],
 ): Promise<boolean> {
   try {
     const response = await subagents.prompt({
       ...address,
-      content: [{ type: 'text', text }] satisfies readonly ContentBlock[],
+      requestId,
+      // A side conversation is a human interjection on the nearest step.
+      delivery: 'steer',
+      content: [{ type: 'text', text }],
     })
-    return response.result.ok
+    return response.ok
   } catch {
     return false
   }

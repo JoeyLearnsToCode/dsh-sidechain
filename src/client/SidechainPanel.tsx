@@ -40,19 +40,17 @@ import {
   useCallback, useEffect, useMemo, useRef, useState,
   type CSSProperties, type PointerEvent as ReactPointerEvent,
 } from 'react'
-import type {
-  CommandNode, SessionId, SessionListState, SessionSummary, SubagentAddress,
-  SubagentCatalogSnapshot,
-} from '@deepseek-ai/dsh-client-runtime/client'
-import type { SubagentCatalog } from '@deepseek-ai/dsh-client-connection/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress, SubagentCatalog } from '@deepseek-ai/dsh-subagent/client'
+import type { SessionListState, SessionSummary, SubagentCatalogSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { ChatNode, CommandNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import {
   DisclosureRow, IconBranchOutline16, IconBrowseOutline16, IconChevronLeftOutline14, IconCloseOutline16,
-  IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot, TerminalBlock,
+  IconFullscreenOutline16, IconRefreshOutline14, IconRightUpOutline14, MarkdownText, StateDot,
   IconThinkOutline14,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { MarkdownCodeLabels, MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ChatNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import {
   clampPanelWidth, closeSidechainPanel, isSidechainPanelOpen, PANEL_DEFAULT_WIDTH,
@@ -61,9 +59,8 @@ import {
 } from './panel-state.ts'
 import { resolveChildActivity, type ChildActivity } from './child-activity.ts'
 import { observeCreatedChildren, resolveChildSessionId, type ObservedSideCommands } from './SideCommandCard.tsx'
-import { fileMentionsFor } from './sidechain-file-mentions.ts'
 import { readActivityRound } from './sidechain-activity.ts'
-import { blockText, mergeProduced, resultViewSummary } from './sidechain-view.ts'
+import { blockText } from './sidechain-view.ts'
 import type { TranscriptImage, TranscriptRow, ToolDetail } from './sidechain-view.ts'
 
 /** Business actions injected by the slot registration (per session scope). */
@@ -71,7 +68,6 @@ export interface SidechainPanelInjected {
   /** Fetch one child's accumulated, seed-cut transcript. */
   readTranscript(address: SubagentAddress): Promise<{
     rows: readonly TranscriptRow[]
-    produced: readonly string[]
   } | null>
   /** Fetch one running child's live activity line (light tail page). */
   readActivity(address: SubagentAddress): Promise<string | null>
@@ -81,8 +77,6 @@ export interface SidechainPanelInjected {
   refresh(parentSessionId: SessionId): void
   /** Arm (true) or disarm (false) the live catalog membership feed. */
   setCatalogOpen(parentSessionId: SessionId, open: boolean): void
-  /** Open an absolute path on the host (workspaces.openPath). */
-  openPath(path: string): void
 }
 
 /** Full props: session standard kit + the inject share + the locale seat. */
@@ -382,16 +376,8 @@ function Row({ row, activityText, t, onSelect }: {
  *  dump full raw arguments — write/edit payloads can be hundreds of KB). */
 const TOOL_ARGS_MAX = 2000
 
-/** Pretty-print a tool's curated rawInput (the platform contract's salient
- *  input), falling back to the raw arguments JSON truncated to a hard cap. */
-function prettyToolInput(rawInput: unknown, argumentsRaw: string | undefined): string | undefined {
-  if (rawInput !== undefined) {
-    try {
-      return JSON.stringify(rawInput, null, 2)
-    } catch {
-      // non-serializable rawInput: fall through to the arguments fallback
-    }
-  }
+/** Pretty-print a tool call's raw arguments JSON, truncated to a hard cap. */
+function prettyToolInput(argumentsRaw: string | undefined): string | undefined {
   if (argumentsRaw === undefined) return undefined
   const trimmed = argumentsRaw.length > TOOL_ARGS_MAX
     ? `${argumentsRaw.slice(0, TOOL_ARGS_MAX)}…（已截断）`
@@ -409,65 +395,39 @@ function prefersReducedMotion(): boolean {
   return typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
-/** One expandable tool row: collapsed shows the call line; expanded shows
- *  the terminal-style command/output (terminal calls) or the arguments,
- *  result text, and failure detail. */
-function ToolRow({ row, running, codeLabels }: {
+/** One expandable tool row: collapsed shows the call line; expanded shows the
+ *  raw arguments, the result's visible text, and the failure detail. */
+function ToolRow({ row, running, labels }: {
   row: Extract<TranscriptRow, { kind: 'tool' }>
   /** The child session is still running and this call has no result yet. */
   running: boolean
-  codeLabels: MarkdownCodeLabels | undefined
+  labels: MarkdownLabels
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const detail: ToolDetail | undefined = row.detail
-  const callView = detail?.callView
-  const resultView = detail?.resultView
-  const terminal = callView?.card === 'terminal' || resultView?.card === 'terminal'
-  const resultText = resultView === undefined || resultView.card === 'terminal'
-    ? undefined
-    : resultViewSummary(resultView)
-  const inputText = prettyToolInput(
-    callView !== undefined && callView.card === 'generic' ? callView.rawInput : undefined,
-    detail?.arguments,
-  )
+  const inputText = prettyToolInput(detail?.arguments)
   const expandable = detail !== undefined && (
-    terminal
-    || inputText !== undefined
-    || resultText !== undefined
+    inputText !== undefined
+    || detail.output !== undefined
     || detail.error !== undefined
   )
-  const title = callView !== undefined && callView.card !== 'terminal' ? callView.title : row.name
   return (
     <DisclosureRow
       icon={<StateDot state={row.failed ? 'error' : running ? 'ongoing' : 'done'} />}
-      title={title}
+      title={row.name}
       open={open}
       expandable={expandable}
       onToggle={() => { setOpen(value => !value) }}
       collapsedContent={row.failed ? ' ✗' : undefined}
     >
       <div style={styles.toolDetail}>
-        {terminal && callView?.card === 'terminal' ? (
-          <TerminalBlock
-            command={callView.title}
-            cwd={callView.cwd}
-            output={resultView !== undefined && resultView.card === 'terminal' ? resultView.output : undefined}
-            exitCode={resultView !== undefined && resultView.card === 'terminal' ? resultView.exitCode : undefined}
-            signal={resultView !== undefined && resultView.card === 'terminal' ? resultView.signal : undefined}
-            running={running}
-            maxLines={24}
-          />
-        ) : (
-          <>
-            {inputText !== undefined && (
-              <pre style={styles.toolArgs}>{inputText}</pre>
-            )}
-            {resultText !== undefined && (
-              <div style={{ margin: '4px 0' }}>
-                <MarkdownText text={resultText} streaming={false} codeLabels={codeLabels} />
-              </div>
-            )}
-          </>
+        {inputText !== undefined && (
+          <pre style={styles.toolArgs}>{inputText}</pre>
+        )}
+        {detail?.output !== undefined && (
+          <div style={{ margin: '4px 0' }}>
+            <MarkdownText text={detail.output} streaming={false} labels={labels} />
+          </div>
         )}
         {detail?.error !== undefined && (
           <div style={{ ...styles.toolFailed, fontSize: 12, marginTop: 4 }}>
@@ -532,11 +492,10 @@ function TranscriptImages({ images }: {
 }
 
 /** One transcript row from the child session's full visible timeline. */
-function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
+function TranscriptRowView({ row, streaming, labels, t }: {
   row: TranscriptRow
   streaming: boolean
-  codeLabels: MarkdownCodeLabels | undefined
-  fileMentions: MarkdownFileMentions | undefined
+  labels: MarkdownLabels
   t: SidechainPanelProps['t']
 }): JSX.Element {
   if (row.kind === 'user') {
@@ -544,7 +503,7 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
       <div style={styles.userRow}>
         {row.images !== undefined && <TranscriptImages images={row.images} />}
         {row.text !== '' && <div style={styles.userText}>
-          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
+          <MarkdownText text={row.text} streaming={streaming} labels={labels} />
         </div>}
       </div>
     )
@@ -554,7 +513,7 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
       <div style={styles.assistantRow}>
         {row.images !== undefined && <TranscriptImages images={row.images} />}
         {row.text !== '' && <div style={styles.assistantText}>
-          <MarkdownText text={row.text} streaming={streaming} codeLabels={codeLabels} fileMentions={fileMentions} />
+          <MarkdownText text={row.text} streaming={streaming} labels={labels} />
         </div>}
       </div>
     )
@@ -569,12 +528,12 @@ function TranscriptRowView({ row, streaming, codeLabels, fileMentions, t }: {
     return (
       <div style={{ ...styles.assistantRow, color: C.danger }}>
         <div style={styles.assistantText}>
-          <MarkdownText text={row.text} streaming={false} codeLabels={codeLabels} fileMentions={fileMentions} />
+          <MarkdownText text={row.text} streaming={false} labels={labels} />
         </div>
       </div>
     )
   }
-  return <ToolRow row={row} running={streaming && row.detail?.resultView === undefined} codeLabels={codeLabels} />
+  return <ToolRow row={row} running={streaming && row.detail?.output === undefined} labels={labels} />
 }
 
 /** Poll interval for the selected child's transcript while it is running (ms). */
@@ -615,7 +574,7 @@ export function SidechainPanelToggle({ sessionId, useSessions, t }: SidechainPan
  * open and follows the current session.
  */
 export function SidechainPanel({
-  sessionId, useSession, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, openPath, t,
+  sessionId, useChat, useSessions, readTranscript, readActivity, sendPrompt, refresh, setCatalogOpen, t,
 }: SidechainPanelProps): JSX.Element {
   const [open, setOpen] = useState(isSidechainPanelOpen)
   const [selected, setSelected] = useState(selectedChildId)
@@ -648,7 +607,7 @@ export function SidechainPanel({
   // This host remains mounted in the blank-session composer, where command
   // rows and the header do not exist. Seed replayed commands, then reveal only
   // children created or settled after this session observer mounted.
-  const chatNodes = useSession(snapshot => snapshot.chat.nodes.values())
+  const chatNodes = useChat(snapshot => snapshot.nodes.values())
   const commands = useMemo(() => (chatNodes as readonly ChatNode[])
     .filter((node): node is ChatNode<'command'> => node.kind === 'command')
     .map((node): CommandNode => node.data), [chatNodes])
@@ -692,9 +651,12 @@ export function SidechainPanel({
   const catalog = catalogs[sessionId]
   const rows = useMemo(() => sidechainRows(catalog, summaries), [catalog, summaries])
   const running = runningCount(rows)
-  // Stable reference: MarkdownText bakes codeLabels into its streaming cache
+  // Stable reference: MarkdownText bakes the labels into its streaming cache
   // and discards the cache when the reference changes (see its module doc).
-  const codeLabels = useMemo(() => ({ copyLabel: t('code.copy'), copiedLabel: t('code.copied') }), [t])
+  const labels = useMemo<MarkdownLabels>(
+    () => ({ code: { copyLabel: t('code.copy'), copiedLabel: t('code.copied') }, footnotes: t('markdown.footnotes') }),
+    [t],
+  )
 
   // The injected actions can be recreated per render; keep effects pinned to
   // stable keys, reading the latest actions through a ref.
@@ -858,14 +820,6 @@ export function SidechainPanel({
 
   // Transcript fetch state; an epoch guard makes stale responses no-ops.
   const [transcript, setTranscript] = useState<readonly TranscriptRow[] | null>(null)
-  const [produced, setProduced] = useState<readonly string[]>([])
-  // File-mention vocabulary: files the selected child's tool calls produced,
-  // resolved against the child's cwd (the main chat's ui-deliverables policy).
-  const childCwd = selected === undefined ? undefined : summaries[selected]?.cwd
-  const fileMentions = useMemo(
-    () => fileMentionsFor(produced, childCwd, openPath),
-    [produced, childCwd, openPath],
-  )
   const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'error'>('loading')
   const fetchEpoch = useRef(0)
   // Single-flight guard: a poll tick while a fetch is still in flight is
@@ -889,11 +843,6 @@ export function SidechainPanel({
       fetchInFlight.current = false
       if (epoch !== fetchEpoch.current) return
       setTranscript(result?.rows ?? null)
-      // An initial fetch replaces the vocabulary; later polls union it, so
-      // produced paths whose rows slid out of the tail window keep working.
-      setProduced(previous => showLoading
-        ? (result?.produced ?? [])
-        : mergeProduced(previous, result?.produced ?? []))
       setTranscriptState(result === null ? 'error' : 'ready')
       const pending = pendingFinalRead.current
       pendingFinalRead.current = undefined
@@ -1199,8 +1148,7 @@ export function SidechainPanel({
                     key={`${row.kind}:${row.seq}:${index}`}
                     row={row}
                     streaming={selectedRunning && index === all.length - 1}
-                    codeLabels={codeLabels}
-                    fileMentions={fileMentions}
+                    labels={labels}
                     t={t}
                   />
                 ))}

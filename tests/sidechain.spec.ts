@@ -139,8 +139,8 @@ describe('pinned prompt text', () => {
 describe('command registration', () => {
   it('declares argument hints and keeps both questions out of the parent log', () => {
     const { commands } = makeHarness()
-    expect(commands[0]?.input).toEqual({ hint: '<question>', images: true })
-    expect(commands[1]?.input).toEqual({ hint: '<question>', images: true })
+    expect(commands[0]?.input).toEqual({ hint: '<question>', attachments: true })
+    expect(commands[1]?.input).toEqual({ hint: '<question>', attachments: true })
     expect(commands[0]?.recordInput).toBe(false)
     expect(commands[1]?.recordInput).toBe(false)
   })

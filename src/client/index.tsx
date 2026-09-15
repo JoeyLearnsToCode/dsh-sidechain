@@ -8,26 +8,44 @@
  * or engaging the main conversation.
  */
 
-import type { ClientContext, IWorkspaces, SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress, SubagentPromptRequest } from '@deepseek-ai/dsh-subagent/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import { SideCommandCard } from './SideCommandCard.tsx'
 import { SidechainPanel, SidechainPanelToggle, type SidechainPanelInjected } from './SidechainPanel.tsx'
 import { installSidechainStyle } from './panel-style.ts'
-import { fetchActivity, fetchTranscript, sendPrompt } from './sidechain-view.ts'
+import {
+  fetchActivity, fetchTranscript, sendPrompt,
+  type SessionAttachments, type SessionHistory, type SubagentPrompter,
+} from './sidechain-view.ts'
 import { NS, en, zh } from './locales.ts'
 
 export const name = 'dsh-sidechain'
 
-export const inject = ['slots', 'sessions', 'locale', 'connection', 'workspaces']
+// `remote.session` / `remote.subagents` are the generated Remote namespace
+// services: cordis withholds a nested service until its own name is injected.
+export const inject = [
+  'slots', 'sessions', 'remote', 'remote.session', 'remote.subagents', 'locale', 'uiConversation',
+]
 
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.sessions
-  const connection = ctx.get('connection') as ConnectionHandle
-  const workspaces = ctx.get('workspaces') as IWorkspaces
-  const subagents = connection.api.subagents
+  const remote = ctx.remote
+  // Structural slices of the generated Remote namespaces: the panel reads
+  // them through its own narrow contracts.
+  const history: SessionHistory = {
+    page: request => remote.session.page(request),
+    follow: (request, signal) => remote.session.follow(request, signal),
+  }
+  const attachments: SessionAttachments = { attachment: request => remote.session.attachment(request) }
+  const subagents: SubagentPrompter = { prompt: request => remote.subagents.prompt(request) }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-sidechain: sidechain dictionaries')
   // One shared keyframe stylesheet (shimmer sweep); the effect's disposer
   // removes it with the fiber — hot unload leaves no stray <style> tags.
@@ -40,34 +58,35 @@ export function apply(ctx: ClientContext): void {
     () => ctx.slots.register({
       name: 'conversation.chat.commandview',
       key: 'side',
-    }, (props) => <SideCommandCard node={props.node} />),
+      locale: NS,
+    }, (props) => <SideCommandCard node={props.node} t={props.t} />),
   )
   ctx.slots.inject(
     'conversation.chat.commandview',
     () => ctx.slots.register({
       name: 'conversation.chat.commandview',
       key: 'btw',
-    }, (props) => <SideCommandCard node={props.node} />),
+      locale: NS,
+    }, (props) => <SideCommandCard node={props.node} t={props.t} />),
   )
   const panelInject = (_parentSessionId: SessionId): SidechainPanelInjected => ({
     readTranscript(address: SubagentAddress) {
-      return fetchTranscript(connection.api.sessions, address)
+      return fetchTranscript(history, address, attachments)
     },
     readActivity(address: SubagentAddress) {
-      return fetchActivity(connection.api.sessions, address)
+      return fetchActivity(history, address)
     },
     sendPrompt(address: Extract<SubagentAddress, { mode: 'continuable' }>, text: string) {
-      return sendPrompt(subagents, address, text)
+      return sendPrompt(
+        subagents, address, text,
+        crypto.randomUUID() as SubagentPromptRequest['requestId'],
+      )
     },
     refresh(parentSessionId: SessionId): void {
       void sessions.refreshSubagents(parentSessionId)
     },
     setCatalogOpen(parentSessionId: SessionId, open: boolean): void {
       sessions.setSubagentCatalogOpen(parentSessionId, open)
-    },
-    openPath(path: string): void {
-      // Mirror the main chat's openFile: host open failures stay silent.
-      void workspaces.openPath(path).catch(() => {})
     },
   })
   ctx.slots.inject(

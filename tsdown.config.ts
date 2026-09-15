@@ -14,14 +14,19 @@ const PLUGIN_ID = '@dsh-external/dsh-sidechain'
 /** Module specifiers the dsh web shell shares into its frozen module table. */
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ] as const
 
-/** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
+/**
+ * Externals resolved from the loader module table. The table answers exactly
+ * the platform seed words: every other package is either inlined here or
+ * reached through a cordis service, so the browser half never requires a
+ * specifier the shell cannot answer.
+ */
+const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 
 export default [
   {

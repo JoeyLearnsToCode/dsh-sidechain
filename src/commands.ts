@@ -32,7 +32,7 @@ export function createSidechainCommands(
       name: 'side',
       description: 'Start a side conversation in a fork of the current session',
       recordInput: false,
-      input: { hint: '<question>', images: true },
+      input: { hint: '<question>', attachments: true },
       handler: async ({ agent, rawInput, attachments, signal }) => {
         const missing = missingProvider()
         if (missing !== undefined) return { kind: 'error', text: missing }
@@ -69,7 +69,7 @@ export function createSidechainCommands(
       // The question body is not persisted into the parent's command/run log:
       // the child session is the durable record (the panel reads it there).
       recordInput: false,
-      input: { hint: '<question>', images: true },
+      input: { hint: '<question>', attachments: true },
       handler: async ({ agent, rawInput, attachments, signal }) => {
         const question = rawInput.trim()
         if (question === '') {

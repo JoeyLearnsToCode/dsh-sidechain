@@ -6,11 +6,15 @@
  *
  */
 
-import type { CommandNode, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { CommandNode } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import { useMemo } from 'react'
+import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+import { NS } from './locales.ts'
 
-/** Props supplied by the keyed command row. */
-export interface SideCommandCardProps {
+/** Props supplied by the keyed command row plus this plugin's dictionary seat. */
+export interface SideCommandCardProps extends PropsLocale<typeof NS> {
   node: CommandNode
 }
 
@@ -66,7 +70,12 @@ export function observeCreatedChildren(
 }
 
 /** The command card is presentation only; the panel host owns live discovery. */
-export function SideCommandCard({ node }: SideCommandCardProps): JSX.Element {
+export function SideCommandCard({ node, t }: SideCommandCardProps): JSX.Element {
+  // Reference-stable: MarkdownText bakes the labels into its streaming cache.
+  const labels = useMemo<MarkdownLabels>(
+    () => ({ code: { copyLabel: t('code.copy'), copiedLabel: t('code.copied') }, footnotes: t('markdown.footnotes') }),
+    [t],
+  )
   const kind: SideCommandKind = node.name === 'btw' ? 'btw' : 'side'
   const outcome = node.outcome
   const label = outcome === null
@@ -87,7 +96,7 @@ export function SideCommandCard({ node }: SideCommandCardProps): JSX.Element {
       <strong style={{ whiteSpace: 'nowrap', display: 'block', marginBottom: '2px' }}>/{node.name ?? kind}</strong>
       {/* The /btw answer and /side notice render as markdown (tables, code, lists). */}
       <div style={{ overflowX: 'auto' }}>
-        <MarkdownText text={label} streaming={false} />
+        <MarkdownText text={label} streaming={false} labels={labels} />
       </div>
     </div>
   )
