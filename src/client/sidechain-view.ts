@@ -352,14 +352,16 @@ export function transcriptRows(entries: readonly TranscriptEntry[]): TranscriptR
       }
       case 'tool/result': {
         const data = event.data
-        const resultBlock = data.message.content[0]
-        const callId = resultBlock?.toolCallId
-        const index = callId === undefined ? undefined : callRows.get(callId)
+        // 0.2.0 made the tool result a first-class `role: 'tool'` message: the
+        // call identity and the failure flag moved off the content blocks and
+        // onto the message itself.
+        const message = data.message
+        const index = callRows.get(message.toolCallId)
         const error = data.error
-        // A result is failed on the explicit event error OR the block's own
+        // A result is failed on the explicit event error OR the message's own
         // isError flag (tools report hard failures either way).
-        const failed = error !== undefined || resultBlock?.isError === true
-        const output = resultText(resultBlock)
+        const failed = error !== undefined || message.isError === true
+        const output = resultText(message.content)
         if (index !== undefined) {
           const row = rows[index]
           if (row !== undefined && row.kind === 'tool') {
@@ -402,14 +404,13 @@ export interface TranscriptEntry {
 }
 
 /**
- * Read the visible text of one tool result block, or undefined when it
- * carries none (terminal results stay collapsed behind their own row).
- * @param block - first content block of a `tool/result` message.
- * @returns the nested blocks' text, or undefined.
+ * Read the visible text of one tool result's content blocks, or undefined when
+ * it carries none (terminal results stay collapsed behind their own row).
+ * @param blocks - the tool-role message's content blocks.
+ * @returns the blocks' text, or undefined.
  */
-function resultText(block: ContentBlock | undefined): string | undefined {
-  if (block === undefined || block.type !== 'tool-result') return undefined
-  const text = blockText(block.content)
+function resultText(blocks: readonly ContentBlock[]): string | undefined {
+  const text = blockText(blocks)
   return text === '…' ? undefined : text
 }
 

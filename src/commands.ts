@@ -9,6 +9,7 @@ import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { SettlementSilence } from './settle-silence.ts'
 import {
   askSideOneShot,
+  directChildren,
   formatSideList,
   startSideConversation,
   type SideDeps,
@@ -39,8 +40,8 @@ export function createSidechainCommands(
         const arg = rawInput.trim()
         if (arg === 'list' || arg === 'ls') {
           try {
-            const entries = await subagents.listChildren(agent.session.id, signal)
-            return { kind: 'success', text: formatSideList(entries) }
+            const entries = await subagents.listDescendants(agent.session.id, signal)
+            return { kind: 'success', text: formatSideList(directChildren(entries)) }
           } catch (error) {
             return { kind: 'error', text: `sidechain: failed to list side conversations: ${messageOf(error)}` }
           }

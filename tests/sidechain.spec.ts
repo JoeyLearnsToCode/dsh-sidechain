@@ -14,6 +14,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   ContinuableStart,
   ContinuableStartSpec,
+  SubagentDescendantListEntry,
   SubagentListEntry,
   SubagentRun,
   SubagentStartRequest,
@@ -52,7 +53,7 @@ interface Harness {
   subagents: SubagentsLike & {
     start: ReturnType<typeof vi.fn>
     startContinuable: ReturnType<typeof vi.fn>
-    listChildren: ReturnType<typeof vi.fn>
+    listDescendants: ReturnType<typeof vi.fn>
     getProvider: ReturnType<typeof vi.fn>
   }
   commands: CommandDefinition[]
@@ -64,7 +65,7 @@ function makeHarness(deps: SideDeps = DEFAULT_DEPS): Harness {
   const subagents = {
     start: vi.fn(),
     startContinuable: vi.fn(),
-    listChildren: vi.fn(),
+    listDescendants: vi.fn(),
     getProvider: vi.fn(() => ({ name: deps.providerName })),
   } as unknown as Harness['subagents']
   const noteChild = vi.fn()
@@ -100,7 +101,15 @@ function runOf(result: Promise<unknown> = new Promise<never>(() => {})): Subagen
 
 type ChildEntry = Extract<SubagentListEntry, { kind: 'child' }>
 
-function childEntry(partial: Partial<ChildEntry> = {}): SubagentListEntry {
+/**
+ * One direct child row of the descendant feed. 0.2.0's `/side list` reads
+ * `listDescendants` (the direct-children-only `listChildren` lost its activity
+ * and diagnostics), so a row carries its catalog parent and depth — direct
+ * children of the listed session are depth 1.
+ */
+function childEntry(
+  partial: Partial<ChildEntry> & { parentId?: SessionId; depth?: number } = {},
+): SubagentDescendantListEntry {
   const mode = partial.mode ?? 'continuable'
   const label = (partial as { label?: string }).label
   return {
@@ -108,11 +117,19 @@ function childEntry(partial: Partial<ChildEntry> = {}): SubagentListEntry {
     id: partial.id ?? CHILD_ID,
     activity: partial.activity ?? 'inactive',
     hasChildren: partial.hasChildren ?? false,
+    parentId: partial.parentId ?? PARENT_ID,
+    depth: partial.depth ?? 1,
     mode,
     ...(mode === 'continuable'
       ? { label: label ?? 'Side conversation' }
       : label === undefined ? {} : { label }),
-  } as SubagentListEntry
+  } as SubagentDescendantListEntry
+}
+
+/** One diagnostic row of the descendant feed (a corrupt/unreadable child). */
+function diagnosticEntry(id: SessionId, reason: 'corrupt' | 'unsupported' | 'unavailable', depth = 1)
+  : SubagentDescendantListEntry {
+  return { kind: 'diagnostic', id, reason, parentId: PARENT_ID, depth }
 }
 
 describe('pinned prompt text', () => {
@@ -283,27 +300,31 @@ describe('/side (continuable side thread)', () => {
     expect(noteChild).toHaveBeenCalledWith(agent, CHILD_ID)
   })
 
-  it('lists children of the current session through /side list', async () => {
+  it('lists the direct children of the current session through /side list', async () => {
     const { subagents, commands } = makeHarness()
-    subagents.listChildren.mockResolvedValue([
+    subagents.listDescendants.mockResolvedValue([
       childEntry({ activity: 'running', label: 'seams research' }),
       childEntry({ mode: 'one-shot', label: 'BTW: quick check' }),
-      { kind: 'diagnostic', id: 'child-3' as SessionId, reason: 'corrupt' },
+      diagnosticEntry('child-3' as SessionId, 'corrupt'),
+      // A grandchild is not a side conversation of THIS session: the listing
+      // filters the descendant feed down to the direct children.
+      childEntry({ id: 'grandchild-4' as SessionId, parentId: CHILD_ID, depth: 2 }),
     ])
 
     const result = await invoke(commands[0]!, 'list')
 
-    expect(subagents.listChildren).toHaveBeenCalledWith(PARENT_ID, expect.any(AbortSignal))
+    expect(subagents.listDescendants).toHaveBeenCalledWith(PARENT_ID, expect.any(AbortSignal))
     expect(result.kind).toBe('success')
     const text = result.kind === 'success' ? result.text : ''
     expect(text).toContain('[side/running] seams research')
     expect(text).toContain('[btw/inactive] BTW: quick check')
     expect(text).toContain('[unavailable] child-3 (corrupt)')
+    expect(text).not.toContain('grandchild-4')
   })
 
   it('reports an empty catalog', async () => {
     const { subagents, commands } = makeHarness()
-    subagents.listChildren.mockResolvedValue([])
+    subagents.listDescendants.mockResolvedValue([])
 
     const result = await invoke(commands[0]!, 'ls')
 

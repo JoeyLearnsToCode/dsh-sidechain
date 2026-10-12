@@ -83,10 +83,12 @@ export function apply(ctx: ClientContext): void {
       )
     },
     refresh(parentSessionId: SessionId): void {
-      void sessions.refreshSubagents(parentSessionId)
-    },
-    setCatalogOpen(parentSessionId: SessionId, open: boolean): void {
-      sessions.setSubagentCatalogOpen(parentSessionId, open)
+      // 0.2.0 replaced the fetch-based catalog with a session projection:
+      // `refreshProjections` loads the session's projection baseline once per
+      // connection (later calls are no-ops, failed reads retry). There is no
+      // arm/disarm feed any more — the catalog arrives as pushed projection
+      // values for the connected session.
+      void sessions.refreshProjections(parentSessionId)
     },
   })
   ctx.slots.inject(

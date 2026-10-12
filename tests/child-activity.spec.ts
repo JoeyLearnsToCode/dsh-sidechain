@@ -3,26 +3,23 @@ import { resolveChildActivity, type CatalogState } from '../src/client/child-act
 
 describe('resolveChildActivity', () => {
   describe('catalog state machine', () => {
-    it('returns unknown when no catalog has been fetched (absent)', () => {
+    it('returns unknown when no catalog projection row exists (absent)', () => {
       expect(resolveChildActivity({
         catalogState: 'absent',
-        catalogActivity: undefined,
         summaryRunning: undefined,
       })).toBe('unknown')
     })
 
-    it('returns unknown while the catalog is loading', () => {
+    it('returns unknown while the catalog projection is loading', () => {
       expect(resolveChildActivity({
         catalogState: 'loading',
-        catalogActivity: undefined,
         summaryRunning: undefined,
       })).toBe('unknown')
     })
 
-    it('returns unknown when the catalog fetch errored', () => {
+    it('returns unknown when the catalog projection read errored', () => {
       expect(resolveChildActivity({
         catalogState: 'error',
-        catalogActivity: undefined,
         summaryRunning: undefined,
       })).toBe('unknown')
     })
@@ -30,7 +27,6 @@ describe('resolveChildActivity', () => {
     it('returns inactive when a ready catalog has no entry for the child', () => {
       expect(resolveChildActivity({
         catalogState: 'ready',
-        catalogActivity: undefined,
         summaryRunning: undefined,
       })).toBe('inactive')
     })
@@ -40,43 +36,36 @@ describe('resolveChildActivity', () => {
     it('uses summaryRunning=true even when the catalog is missing', () => {
       expect(resolveChildActivity({
         catalogState: 'absent',
-        catalogActivity: undefined,
         summaryRunning: true,
       })).toBe('running')
     })
 
-    it('uses summaryRunning=false even when the catalog says running', () => {
-      // A settled host frame must beat a stale catalog entry; this is the
-      // "the child just ended and the catalog hasn't caught up" case.
+    it('uses summaryRunning=false even when the catalog is ready', () => {
+      // A settled host frame must beat the catalog's mere membership; this is
+      // the "the child just ended and the catalog hasn't caught up" case.
       expect(resolveChildActivity({
         catalogState: 'ready',
-        catalogActivity: 'running',
         summaryRunning: false,
       })).toBe('inactive')
     })
 
-    it('uses summaryRunning=true over a stale inactive catalog entry', () => {
+    it('uses summaryRunning=true on a ready catalog that also lists the child', () => {
       expect(resolveChildActivity({
         catalogState: 'ready',
-        catalogActivity: 'inactive',
         summaryRunning: true,
       })).toBe('running')
     })
   })
 
   describe('catalog activity fallback', () => {
-    it('returns running when the catalog entry is running and no summary is available', () => {
+    // 0.2.0's SubagentCatalogEntry carries identity, mode, and label only:
+    // per-entry activity was dropped from the projection, so the session
+    // summary is the only live activity source. A member of a ready catalog
+    // with no summary row yet resolves `inactive` (it is a known child, just
+    // not a running one) — never `running`.
+    it('returns inactive for a ready catalog member with no summary row', () => {
       expect(resolveChildActivity({
         catalogState: 'ready',
-        catalogActivity: 'running',
-        summaryRunning: undefined,
-      })).toBe('running')
-    })
-
-    it('returns inactive when the catalog entry is inactive and no summary is available', () => {
-      expect(resolveChildActivity({
-        catalogState: 'ready',
-        catalogActivity: 'inactive',
         summaryRunning: undefined,
       })).toBe('inactive')
     })
@@ -84,9 +73,9 @@ describe('resolveChildActivity', () => {
 
   describe('no-poll regression', () => {
     // These three inputs are the exact signals the /btw command card sees
-    // when its parent catalog has not yet been fetched and the host has no
-    // summary row for the freshly-resolved child. Before the fix, the card
-    // would treat this as running and start a 1.2 s transcript poll. The
+    // when its parent's catalog projection has not landed yet and the host
+    // has no summary row for the freshly-resolved child. Before the fix, the
+    // card would treat this as running and start a 1.2 s transcript poll. The
     // fix routes all of these through `unknown`, which gates the poll off.
     const cardInputs: ReadonlyArray<{
       label: string
@@ -101,7 +90,6 @@ describe('resolveChildActivity', () => {
       it(`does not start a poll when the child is freshly created and the catalog is ${label}`, () => {
         const activity = resolveChildActivity({
           catalogState: state,
-          catalogActivity: undefined,
           summaryRunning: undefined,
         })
         expect(activity).toBe('unknown')

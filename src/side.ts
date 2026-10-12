@@ -14,6 +14,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   ContinuableStart,
   ContinuableStartSpec,
+  SubagentDescendantListEntry,
   SubagentListEntry,
   SubagentRun,
   SubagentStartRequest,
@@ -25,8 +26,25 @@ import { SIDE_BOUNDARY_PROMPT, SIDE_MODE_LINE, type SideMode } from './prompts.t
 export interface SubagentsLike {
   start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
   startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
-  listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>
+  listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>
   getProvider(name: string): { readonly name: string } | undefined
+}
+
+/**
+ * Direct children of one session from the descendant feed.
+ *
+ * 0.2.0 split child listing in two: `listChildren` returns the bare catalog
+ * projection entries (identity, mode, and label — no `activity`, no
+ * diagnostics), while `listDescendants` walks the reachable parent catalogs and
+ * carries each row's catalog parent, depth, activity, and the
+ * corrupt/unsupported/unavailable diagnostics. `/side list` keeps its old
+ * listing by reading the descendant feed and keeping the depth-1 rows — the
+ * requested session's direct children — only.
+ * @param entries - the descendant feed rooted at the parent session.
+ * @returns the direct children, in catalog order.
+ */
+export function directChildren(entries: readonly SubagentDescendantListEntry[]): SubagentListEntry[] {
+  return entries.filter(entry => entry.depth === 1)
 }
 
 /** Shared side-conversation behavior for both commands. */

@@ -80,7 +80,7 @@ describe('transcriptRows', () => {
     const rows = transcriptRows(ent(
       event('user/message', 1, { content: [{ type: 'text', text: '查一下' }] }),
       event('tool/call', 2, { name: 'grep', arguments: '{}' }),
-      event('tool/result', 3, { message: { content: [] } }),
+      event('tool/result', 3, { message: { toolCallId: 'c1', content: [] } }),
       event('assistant/message', 4, { message: { content: [{ type: 'text', text: '结果如下' }] } }),
     ))
     expect(rows).toEqual([
@@ -94,7 +94,7 @@ describe('transcriptRows', () => {
     const rows = transcriptRows(ent(
       event('tool/call', 1, { name: 'grep', arguments: '{}', callId: 'c1' }),
       event('tool/result', 2, {
-        message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] },
+        message: { toolCallId: 'c1', content: [] },
         error: { name: 'E', code: 'C' },
       }),
     ))
@@ -104,11 +104,11 @@ describe('transcriptRows', () => {
     }])
   })
 
-  it('marks a result failed on the block isError flag', () => {
+  it('marks a result failed on the tool-role message isError flag', () => {
     const rows = transcriptRows(ent(
       event('tool/call', 1, { name: 'edit', arguments: '{}', callId: 'c1' }),
       event('tool/result', 2, {
-        message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: true }] },
+        message: { toolCallId: 'c1', content: [], isError: true },
       }),
     ))
     expect(rows[0]).toMatchObject({ kind: 'tool', failed: true })
@@ -117,7 +117,7 @@ describe('transcriptRows', () => {
   it('keeps the error on orphan failed rows (expandable detail)', () => {
     const rows = transcriptRows(ent(
       event('tool/result', 1, {
-        message: { content: [{ type: 'tool-result', toolCallId: 'c9', content: [] }] },
+        message: { toolCallId: 'c9', content: [] },
         error: { name: 'E', code: 'C' },
       }),
     ))
@@ -132,11 +132,8 @@ describe('transcriptRows', () => {
       event('tool/call', 1, { name: 'bash', arguments: '{}', callId: 'c1' }),
       event('tool/result', 2, {
         message: {
-          content: [{
-            type: 'tool-result',
-            toolCallId: 'c1',
-            content: [{ type: 'text', text: 'src\n' }],
-          }],
+          toolCallId: 'c1',
+          content: [{ type: 'text', text: 'src\n' }],
         },
       }),
     ))

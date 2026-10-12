@@ -1,10 +1,10 @@
 {
   "id": "dsh-sidechain",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "main": "./lib/index.js",
   "description": "DSH side-conversation plugin: /side and /btw start isolated forked child sessions (Codex /side & /btw semantics).",
   "engines": {
-    "dsh": "0.1.5-rc.1 || 0.1.5-rc.2"
+    "dsh": "0.2.0-rc.2"
   },
   "contributes": {
     "tools": [],

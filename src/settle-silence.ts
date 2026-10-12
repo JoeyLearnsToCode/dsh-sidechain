@@ -99,7 +99,9 @@ export function createSettlementSilence(ctx: Context): SettlementSilence {
 
   // Protect live parents on hot load and future parents after a cold restart.
   for (const agent of ctx.agents.list()) protect(agent)
-  const removeCreatedListener = ctx.on('agent/created', ({ agent }) => { protect(agent) })
+  // 0.2.0 dispatches `agent/created` serialized and awaits each listener, so a
+  // listener must yield `undefined` (or a promise) instead of a bare `void`.
+  const removeCreatedListener = ctx.on('agent/created', ({ agent }) => void protect(agent))
 
   return {
     reserveChild(parent): SessionId {
